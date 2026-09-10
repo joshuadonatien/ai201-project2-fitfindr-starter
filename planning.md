@@ -119,14 +119,97 @@ It never raises.
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
-<!-- Describe the logic your planning loop uses. What does it look at? What conditions change its behavior? How does it know when it's done? -->
+
+The loop lives in `run_agent(query, wardrobe)` in `agent.py`. It is **not** a
+fixed "call all three tools" pipeline — after each step it inspects the session
+state and branches:
+
+1. **Parse.** `_parse_query()` runs regex over the raw query to pull out
+   `size` (`\bsize\s+(\S+)\b`), `max_price` (`under/below/less than/$N`), and a
+   cleaned `description` (query minus those clauses minus conversational
+   filler). Regex was chosen over an LLM parse so it is deterministic, free,
+   and unit-testable. Result stored in `session["parsed"]`.
+
+2. **search_listings** always runs, with the parsed params. Result →
+   `session["search_results"]`.
+
+3. **Branch on the result count:**
+   - **`len(search_results) == 0`** → the loop calls `_relax_constraints()`,
+     which loosens the single most restrictive optional filter (drop `size`
+     first; else raise `max_price` by 1.5×) and retries `search_listings`
+     **once**. `session["retried_search"]` and `session["relaxed_constraint"]`
+     record this.
+     - Still `0` after the retry → set `session["error"]` to an actionable
+       message and **return immediately**. `suggest_outfit` and
+       `create_fit_card` are never called; `selected_item`, `outfit_suggestion`,
+       and `fit_card` stay `None`.
+   - **`len(search_results) >= 1`** → continue.
+
+4. **Select** `search_results[0]` (highest keyword score) →
+   `session["selected_item"]`.
+
+5. **suggest_outfit** runs with `selected_item` + `wardrobe`. The tool itself
+   branches internally on `wardrobe["items"]` being empty (general advice) vs
+   populated (named-piece combos). Result → `session["outfit_suggestion"]`.
+
+6. **Branch on the outfit string:**
+   - starts with `"[suggest_outfit error]"` → set `session["error"]` to that
+     string and **return**. `create_fit_card` is never called.
+   - otherwise → continue.
+
+7. **create_fit_card** runs with `outfit_suggestion` + `selected_item`. Result
+   → `session["fit_card"]`. A `"[create_fit_card error]"` result is **non-fatal**
+   — it is stored and shown, but `session["error"]` stays `None` because the
+   listing and outfit are still valid output.
+
+8. **Done** — return the session. The loop is single-pass; "done" = it either
+   hit an early-return branch or completed step 7. There is no re-planning
+   cycle because the task is a fixed 3-stage funnel (find → style → caption);
+   the adaptiveness is in *which* stages run, not in reordering them.
+
+**Different inputs → different tool sequences:**
+
+| Input | search | retry | suggest_outfit | create_fit_card |
+|-------|:---:|:---:|:---:|:---:|
+| "vintage graphic tee under $30" (happy path) | ✓ (20 hits) | – | ✓ | ✓ |
+| "designer ballgown size XXS under $5" (no match) | ✓ (0) | ✓ (0) | ✗ | ✗ |
+| "combat boots size 99" (bad size) | ✓ (0) | ✓ drops size | ✓ | ✓ |
+| happy path but Groq is down | ✓ | – | ✓ → error string | ✗ |
 
 ---
 
 ## State Management
 
 **How does information from one tool get passed to the next?**
-<!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
+
+A single **session dict**, created by `_new_session()` at the top of
+`run_agent()`, is the one source of truth for the interaction. Nothing is
+stored in globals; the user is asked for input exactly once (the `query`
+argument) and never re-prompted between steps.
+
+**What is stored, and when:**
+
+| Key | Written by | Read by |
+|-----|-----------|---------|
+| `query` | `_new_session` (step 1) | parser |
+| `parsed` = `{description, size, max_price}` | step 2 | `search_listings` call |
+| `search_results` (list[dict]) | step 3 (+ retry) | branch check, step 4 |
+| `selected_item` (dict) | step 4 | `suggest_outfit` **and** `create_fit_card` |
+| `wardrobe` (dict) | `_new_session` | `suggest_outfit` |
+| `outfit_suggestion` (str) | step 5 | branch check, `create_fit_card` |
+| `fit_card` (str) | step 7 | UI |
+| `error` (str \| None) | any early-return branch | UI (checked first) |
+| `steps` (list[str]) | every step | debugging / demo narration |
+| `retried_search`, `relaxed_constraint` | step 3b | UI note |
+
+**How it flows without re-entry:** `search_listings` returns a list; the loop
+assigns `session["selected_item"] = results[0]` and then passes
+*that same dict object* into `suggest_outfit(session["selected_item"], ...)` and
+later into `create_fit_card(..., session["selected_item"])`. Verified with an
+`id()` check: the object id of `session["selected_item"]` is identical to the
+id of the argument received by both downstream tools. Likewise the exact string
+`suggest_outfit` returns is what `create_fit_card` receives —
+`session["outfit_suggestion"]` is passed by reference, not rebuilt.
 
 ---
 
@@ -156,6 +239,62 @@ For each tool, describe the specific failure mode you're handling and what the a
      an embedded image or screenshot cannot be evaluated.
      You'll share this diagram with an AI tool when asking it to implement
      the planning loop and each individual tool. -->
+
+```mermaid
+flowchart TD
+    U([User query + wardrobe choice]) --> HQ["app.py handle_query()"]
+    HQ -->|empty query| UIerr1[/"panel 1: prompt to type something"/]
+    HQ --> RA["agent.py run_agent()"]
+
+    subgraph SESSION [session dict - single source of truth]
+        direction LR
+        S1[parsed]:::st
+        S2[search_results]:::st
+        S3[selected_item]:::st
+        S4[outfit_suggestion]:::st
+        S5[fit_card]:::st
+        S6[error]:::st
+    end
+
+    RA --> P["_parse_query() - regex"]
+    P -->|writes parsed| S1
+    S1 --> T1[["search_listings(description, size, max_price)"]]
+    T1 -->|writes search_results| S2
+
+    S2 --> D1{"results empty?"}
+    D1 -->|yes| RLX["_relax_constraints() - drop size / raise price"]
+    RLX --> T1b[["search_listings (retry once)"]]
+    T1b --> D2{"still empty?"}
+    D2 -->|yes| E1["set error = no-match message"]
+    E1 --> S6
+    D2 -->|no| SEL
+    D1 -->|no| SEL[["select top result -> selected_item"]]
+    SEL -->|writes selected_item| S3
+
+    S3 --> T2[["suggest_outfit(selected_item, wardrobe)"]]
+    T2 -.reads.-> S3
+    T2 -->|writes outfit_suggestion| S4
+    S4 --> D3{"outfit is an error string?"}
+    D3 -->|yes| E2["set error = outfit string"]
+    E2 --> S6
+    D3 -->|no| T3[["create_fit_card(outfit_suggestion, selected_item)"]]
+    T3 -.reads.-> S3
+    T3 -.reads.-> S4
+    T3 -->|writes fit_card| S5
+
+    S5 --> RET([return session])
+    S6 --> RET
+    RET --> HQ2["handle_query maps session -> 3 panels"]
+    HQ2 -->|error set| UIerr2[/"panel 1: warning + hint, panels 2-3 empty"/]
+    HQ2 -->|success| UIok[/"panel 1: listing, panel 2: outfit, panel 3: fit card"/]
+
+    classDef st fill:#eef,stroke:#88a;
+```
+
+Control flow = solid arrows (top to bottom). State writes/reads = labelled
+arrows into/out of the session dict. Error paths branch off at `D1/D2` (no
+listings) and `D3` (styling failed) and short-circuit straight to
+`return session` — the tools further down the funnel are skipped.
 
 ---
 
@@ -198,6 +337,25 @@ parameter names/types and failure-mode handling before being run, then locked
 in with the pytest tests in `tests/test_tools.py`.
 
 **Milestone 4 — Planning loop and state management:**
+Tool used: Claude (Claude Code). Input given: the full Planning Loop section
+above (the numbered branch logic + the "different inputs → different sequences"
+table), the State Management table, and the Mermaid architecture diagram, plus
+the `agent.py` TODO comments. Asked it to implement `run_agent()` matching that
+spec and `handle_query()` in `app.py`.
+Expected output: a single-pass loop that (a) parses with regex into
+`session["parsed"]`, (b) calls `search_listings`, (c) branches on the result
+count — one relaxed retry then early-return-with-error if still empty, never
+calling the LLM tools, (d) passes `session["selected_item"]` by reference into
+both `suggest_outfit` and `create_fit_card`, (e) early-returns if
+`suggest_outfit` returns an error string.
+Verification before trusting it:
+- `python agent.py` — happy path calls all 3 tools; no-results path leaves
+  `error` set and `outfit_suggestion` / `fit_card` `None`.
+- `id()` check — `session["selected_item"]` is the *same object* passed into
+  both downstream tools (no re-entry, no hardcoded values).
+- `tests/test_agent.py` — 9 tests: monkeypatch the LLM tools to record calls and
+  assert the loop skips them on the no-results and LLM-failure branches, and
+  that state identity holds on the happy path. These run without an API key.
 
 ---
 
@@ -207,14 +365,59 @@ Write out what a full user interaction looks like from start to finish — tool 
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+**Step 0 — parse.** `_parse_query()` extracts:
+`{description: "a vintage graphic tee baggy jeans and chunky sneakers",
+size: None, max_price: 30.0}` — it caught "under $30", found no "size …"
+clause, and stripped the filler ("I'm looking for", "how would I style it").
+Stored in `session["parsed"]`.
 
-**Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+**Step 1 — `search_listings("a vintage graphic tee baggy jeans and chunky
+sneakers", None, 30.0)`.**
+Why this tool: we can't style or caption anything until we have a real listing.
+Filters out everything over $30, scores the rest on keyword overlap.
+Returns **21** listing dicts, best match first. Stored in
+`session["search_results"]`. Count > 0 → no retry, continue.
 
-**Step 3:**
-<!-- Continue until the full interaction is complete -->
+**Step 2 — select.** `session["selected_item"] = search_results[0]` =
+*Vintage Band Tee — Faded Grey*, $19, size L, depop. This exact dict is what
+every later step uses — the user is not asked to pick.
 
-**Final output to user:**
-<!-- What does the user actually see at the end? -->
+**Step 3 — `suggest_outfit(session["selected_item"], wardrobe)`.**
+Why this tool: the user asked "how would I style it", and we now have an item +
+their 10-piece wardrobe. The tool sees a non-empty wardrobe so it builds
+concrete combinations. Returns a string naming 2 outfits:
+> **1. "Grunge-Rock Remix"** – Vintage Band Tee + Baggy straight-leg jeans,
+> dark wash + Black combat boots + Vintage black denim jacket + Brown leather
+> belt + Black crossbody bag …
+> **2. "Minimalist Street-Vibe"** – Vintage Band Tee + Wide-leg khaki trousers
+> + Black cropped zip hoodie + Chunky white sneakers …
+
+Stored in `session["outfit_suggestion"]`. Does not start with
+`"[suggest_outfit error]"` → continue.
+
+**Step 4 — `create_fit_card(session["outfit_suggestion"],
+session["selected_item"])`.**
+Why this tool: turn the styled look into something shareable. Gets the outfit
+string from step 3 and the same item dict from step 2 — nothing re-entered.
+Returns:
+> Scored this Vintage Band Tee — Faded Grey for $19 on depop and teamed it with
+> baggy straight-leg jeans, a black denim jacket and combat boots for a solid
+> grunge-rock remix vibe. The oversized denim keeps the silhouette loose, while
+> the belt and black crossbody add just the right amount of rugged edge.
+> #grunge #secondhandstyle
+
+Stored in `session["fit_card"]`. `session["error"]` is still `None`.
+
+**Final output to user (three Gradio panels):**
+- **🛍️ Top listing found:** "Vintage Band Tee — Faded Grey / $19 · fair
+  condition · depop / Size L · tops / Style: vintage, band tee, … / Colors:
+  grey, black / <description>"
+- **👗 Outfit idea:** the two named outfits from step 3.
+- **✨ Your fit card:** the caption from step 4.
+
+**Contrast — the no-results branch:** for "designer ballgown size XXS under $5",
+step 1 returns `[]`, the loop retries once after dropping the size filter, still
+gets `[]`, sets `session["error"]` = *"No listings matched \"designer
+ballgown\" (size XXS, under $5). Try broader keywords, a wider size, or a higher
+price ceiling."* and returns. `suggest_outfit` and `create_fit_card` are never
+called; the UI shows the warning in panel 1 and leaves panels 2–3 empty.
