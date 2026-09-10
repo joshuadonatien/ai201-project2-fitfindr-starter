@@ -231,7 +231,15 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 
     # Step 5b — adaptive branch: styling failed → stop before create_fit_card
     if session["outfit_suggestion"].startswith("[suggest_outfit error]"):
-        session["error"] = session["outfit_suggestion"]
+        detail = session["outfit_suggestion"].split("]", 1)[1].strip()
+        session["error"] = (
+            f"Found \"{session['selected_item']['title']}\" "
+            f"(${session['selected_item']['price']:g} on "
+            f"{session['selected_item']['platform']}), but the styling step is "
+            f"unavailable right now, so there's no outfit or fit card yet. "
+            f"Your search worked — try again in a moment. "
+            f"(Technical detail: {detail})"
+        )
         session["steps"].append(
             "STOP: suggest_outfit failed — create_fit_card was not called"
         )

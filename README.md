@@ -103,21 +103,58 @@ Your README submission must document each tool's name, inputs, and return value.
 <!-- For each tool, describe the specific failure mode and what your agent does in response.
      This maps to the error handling section of the rubric (F5-C1). -->
 
+Every failure mode below was triggered on purpose and the output captured in
+[`FAILURE_MODES.md`](FAILURE_MODES.md); automated versions are in
+[`tests/test_failure_modes.py`](tests/test_failure_modes.py) (9 tests, passing).
+
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| `search_listings` | | |
-| `suggest_outfit` | | |
-| `create_fit_card` | | |
+| `search_listings` | Query + filters match nothing in the 40-item dataset (returns `[]`, never raises) | Planning loop makes **one** relaxed retry (drops `size`, else raises `max_price` 1.5×). Still empty → sets `session["error"]` naming the keywords, the applied filters, and three fixes ("broader keywords, a wider size, or a higher price ceiling"), then returns. `suggest_outfit` / `create_fit_card` are **not** called. |
+| `suggest_outfit` | `wardrobe["items"]` is empty | Not treated as an error — the tool switches to its general-styling-advice prompt and returns a full advice string. The loop continues to `create_fit_card` normally. |
+| `suggest_outfit` | Groq call fails (invalid key, network, rate limit) | Tool catches it and returns `"[suggest_outfit error] …"`. The loop detects the prefix, **skips `create_fit_card`**, and rewrites it into an actionable message: what still worked (search + found item), what failed (styling), what to do ("try again in a moment"), with the raw error kept in parentheses. |
+| `create_fit_card` | `outfit` is empty / whitespace / not a string | Guard clause returns `"[create_fit_card error] No outfit was provided… Run suggest_outfit first."` **before any LLM call**. No exception, no wasted request. |
+| `create_fit_card` | Groq call fails | Tool returns `"[create_fit_card error] …"`. **Non-fatal** — the loop keeps `session["error"] = None` and still returns the listing + outfit; the UI shows the caption panel with a "couldn't generate a caption this time" note. |
+
+**Concrete example from testing** (from `FAILURE_MODES.md`, Failure 4):
+
+```
+$ GROQ_API_KEY=gsk_invalid_key_for_testing python -c "from agent import run_agent;
+  from utils.data_loader import get_example_wardrobe;
+  print(run_agent('vintage graphic tee under $30', get_example_wardrobe())['error'])"
+
+Found "Vintage Band Tee — Faded Grey" ($19 on depop), but the styling step is
+unavailable right now, so there's no outfit or fit card yet. Your search worked —
+try again in a moment. (Technical detail: Could not generate outfit ideas:
+Error code: 401 - {'error': {'message': 'Invalid API Key', ...}})
+```
+
+`create_fit_card` was never reached — `session["steps"]` ends with
+`"STOP: suggest_outfit failed — create_fit_card was not called"`.
 
 ---
 
 ## Spec Reflection
 
-<!-- Answer both questions with at least 2–3 sentences each. -->
-
 **One way planning.md helped during implementation:**
+Writing the Tool specs (typed inputs, exact return contents, failure mode) and
+the Planning Loop branch logic *before* coding meant each tool and the loop
+could be handed to an AI tool one spec block at a time and verified against a
+written contract instead of a vague idea. The failure-mode column in particular
+forced the `"[tool_name error] …"` string convention to be decided up front —
+which is what lets the planning loop branch on `str.startswith(...)` instead of
+catching exceptions across module boundaries. The Planning Loop → tool-sequence
+table also became the test plan for `tests/test_agent.py` almost verbatim.
 
 **One divergence from your spec, and why:**
+The Milestone 3 handout specified the LLM model
+`meta-llama/llama-4-scout-17b-16e-instruct`, but Groq no longer serves it
+(`404 model_not_found`), so both LLM tools use `openai/gpt-oss-120b`, a current
+Groq chat model. The tool interfaces, prompts, and error handling are unchanged
+— only the model id string differs. A second, smaller divergence: the spec's
+no-results handling was "stop and tell the user"; the implementation adds one
+automatic relaxed-constraint retry first, because for queries like "boots size
+99" the user almost certainly wants the size loosened, and telling them so
+("retried after dropping the size filter") is more helpful than a dead end.
 
 ---
 
