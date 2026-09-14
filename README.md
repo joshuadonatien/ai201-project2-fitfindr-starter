@@ -5,8 +5,7 @@ in plain English, and it searches a mock listings dataset, builds an outfit
 around the best match using your existing wardrobe, and writes a shareable
 "fit card" caption — all through a Gradio UI.
 
-**Demo video:** _[add your recorded demo link here before submitting — see
-`DEMO_SCRIPT.md` for what to record]_
+**Demo video:** _[add your recorded demo link here before submitting]_
 
 ---
 
@@ -25,7 +24,6 @@ ai201-project2-fitfindr-starter/
 ├── tests/                     # pytest suite (tools, loop, failure modes)
 ├── planning.md                # Design spec, written before implementation
 ├── FAILURE_MODES.md           # Deliberately triggered failures + output
-├── DEMO_SCRIPT.md             # What to record for the demo video
 └── requirements.txt           # Python dependencies
 ```
 
@@ -372,10 +370,10 @@ before being trusted, not just eyeballed.
 
 **Link:** _[add here once recorded]_
 
-The recording shows, per `DEMO_SCRIPT.md`:
+The recording shows:
 1. A complete interaction from a natural-language query to a fit card, using
-   all 3 required tools, narrated tool-by-tool.
-2. State visibly/verbally passing between tools (the same item and outfit
-   text carried forward with no re-entry).
+   all 3 required tools.
+2. State visibly passing between tools (the same item and outfit text carried
+   forward with no re-entry).
 3. At least one deliberately triggered failure and the agent's graceful,
    informative response.
