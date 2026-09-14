@@ -112,8 +112,11 @@ def test_suggest_outfit_failure_stops_before_create_fit_card(monkeypatch):
     session = run_agent("vintage graphic tee under $30", get_example_wardrobe())
 
     assert calls == []                       # create_fit_card was skipped
-    assert session["error"].startswith("[suggest_outfit error]")
     assert session["fit_card"] is None
+    # the agent surfaces an actionable message, not the raw error string
+    assert not session["error"].startswith("[suggest_outfit error]")
+    assert "styling step is unavailable" in session["error"]
+    assert "simulated outage" in session["error"]   # technical detail preserved
 
 
 def test_zero_result_search_triggers_one_relaxed_retry(monkeypatch):
