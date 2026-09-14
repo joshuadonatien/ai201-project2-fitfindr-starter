@@ -43,8 +43,44 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
            string and return it along with session["outfit_suggestion"] and
            session["fit_card"].
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    # 1. empty-query guard
+    if not user_query or not user_query.strip():
+        return "Type what you're looking for above (e.g. \"vintage graphic tee under $30\").", "", ""
+
+    # 2. pick the wardrobe
+    wardrobe = (
+        get_empty_wardrobe()
+        if wardrobe_choice.startswith("Empty")
+        else get_example_wardrobe()
+    )
+
+    # 3. run the planning loop
+    session = run_agent(user_query.strip(), wardrobe)
+
+    # 4. early-exit error (no results, or styling step failed)
+    if session["error"]:
+        note = ""
+        if session["retried_search"]:
+            note = f"\n\n(Also tried after we {session['relaxed_constraint']} — still nothing.)"
+        return f"⚠️ {session['error']}{note}", "", ""
+
+    # 5. format the carried-forward item + the two LLM outputs
+    item = session["selected_item"]
+    listing_text = "\n".join([
+        item["title"],
+        f"${item['price']:g}  ·  {item['condition']} condition  ·  {item['platform']}",
+        f"Size {item['size']}  ·  {item['category']}",
+        f"Style: {', '.join(item['style_tags'])}",
+        f"Colors: {', '.join(item['colors'])}",
+        "",
+        item["description"],
+    ])
+
+    fit_card = session["fit_card"] or ""
+    if fit_card.startswith("[create_fit_card error]"):
+        fit_card = f"(Couldn't generate a caption this time — {fit_card})"
+
+    return listing_text, session["outfit_suggestion"], fit_card
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
