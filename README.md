@@ -5,7 +5,7 @@ in plain English, and it searches a mock listings dataset, builds an outfit
 around the best match using your existing wardrobe, and writes a shareable
 "fit card" caption — all through a Gradio UI.
 
-**Demo video:** _[add your recorded demo link here before submitting]_
+**Demo video:** https://drive.google.com/file/d/1EvwQfD7pHNmuN5ees3cLZvEAw-Cx314d/view?usp=sharing
 
 ---
 
@@ -368,7 +368,7 @@ before being trusted, not just eyeballed.
 
 ## Demo Video
 
-**Link:** _[add here once recorded]_
+**Link:** https://drive.google.com/file/d/1EvwQfD7pHNmuN5ees3cLZvEAw-Cx314d/view?usp=sharing
 
 The recording shows:
 1. A complete interaction from a natural-language query to a fit card, using
